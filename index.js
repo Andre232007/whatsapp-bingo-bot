@@ -4,6 +4,9 @@ const express = require('express');
 const fs = require('fs');
 const app = express();
 
+// Configuração do Chrome para o Render
+const chromium = require('chrome-aws-lambda');
+
 // Configurações do Bingo
 const CONFIG = {
     minNum: 1,
@@ -95,7 +98,6 @@ function formatarSorteados() {
     mensagem += `📈 Restam: ${CONFIG.maxNum - numeros.length}\n\n`;
     mensagem += "🔢 *Lista completa:*\n";
     
-    // Formatar em grupos de 10 para ficar mais legível
     for (let i = 0; i < numeros.length; i += 10) {
         const grupo = numeros.slice(i, i + 10);
         mensagem += grupo.join(" • ") + "\n";
@@ -160,52 +162,40 @@ async function processCommand(message, command, sender) {
     }
 }
 
-// Inicializar cliente do WhatsApp
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        executablePath: '/usr/bin/google-chrome-stable',
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
+// Inicializar cliente do WhatsApp com Chromium do Render
+async function initializeClient() {
+    let executablePath;
+    
+    if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
+        // Está no Render
+        executablePath = await chromium.executablePath;
+        console.log('📦 Usando Chromium do Render');
+    } else {
+        // Local
+        executablePath = undefined; // Deixa o puppeteer encontrar
     }
-});
-
-client.on('qr', (qr) => {
-    console.log('📱 Escaneie o QR Code abaixo com seu WhatsApp:');
-    qrcode.generate(qr, {small: true});
-});
-
-client.on('ready', () => {
-    console.log('✅ Bot está online e funcionando!');
-    console.log(`🎮 Comandos disponíveis: ${Object.values(CONFIG.commands).join(', ')}`);
-    loadData(); // Carregar dados salvos
-});
-
-client.on('message', async (message) => {
-    if (message.from === 'status@broadcast') return;
-    if (message.isStatus) return;
     
-    const msgBody = message.body.trim();
-    const isCommand = Object.values(CONFIG.commands).some(cmd => msgBody.startsWith(cmd));
-    
-    if (isCommand) {
-        console.log(`📨 Comando recebido de ${message.from}: ${msgBody}`);
-        const response = await processCommand(message, msgBody, message.from);
-        if (response) {
-            await message.reply(response);
-            console.log(`✅ Resposta enviada para ${message.from}`);
+    const client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            executablePath: executablePath,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu'
+            ]
         }
-    }
-});
+    });
+    
+    return client;
+}
 
-// Servidor HTTP para manter o bot ativo no Render
+// Servidor HTTP
 app.get('/', (req, res) => {
     res.json({
         status: 'online',
@@ -228,4 +218,40 @@ app.listen(PORT, () => {
 });
 
 // Iniciar o bot
-client.initialize();
+async function start() {
+    console.log('🚀 Iniciando bot...');
+    loadData();
+    
+    const client = await initializeClient();
+    
+    client.on('qr', (qr) => {
+        console.log('📱 Escaneie o QR Code abaixo com seu WhatsApp:');
+        qrcode.generate(qr, {small: true});
+    });
+    
+    client.on('ready', () => {
+        console.log('✅ Bot está online e funcionando!');
+        console.log(`🎮 Comandos disponíveis: ${Object.values(CONFIG.commands).join(', ')}`);
+    });
+    
+    client.on('message', async (message) => {
+        if (message.from === 'status@broadcast') return;
+        if (message.isStatus) return;
+        
+        const msgBody = message.body.trim();
+        const isCommand = Object.values(CONFIG.commands).some(cmd => msgBody.startsWith(cmd));
+        
+        if (isCommand) {
+            console.log(`📨 Comando recebido de ${message.from}: ${msgBody}`);
+            const response = await processCommand(message, msgBody, message.from);
+            if (response) {
+                await message.reply(response);
+                console.log(`✅ Resposta enviada para ${message.from}`);
+            }
+        }
+    });
+    
+    await client.initialize();
+}
+
+start().catch(console.error);
